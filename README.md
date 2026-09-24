@@ -29,6 +29,19 @@ docker run --rm -it --network host \
   ghcr.io/cowwo/dsh:latest
 ```
 
+## 镜像里有什么
+
+| 类别 | 内容 |
+|---|---|
+| 运行时 | Node.js 24、npm 11、pnpm、dsh |
+| 版本控制 | `git`、`openssh-client`、`gh`（GitHub CLI） |
+| 网络 | `curl`、`wget`、`ca-certificates` |
+| Python | `python3`、`pip3`、`venv` |
+
+> Debian 12 的 Python 受 PEP 668 保护，全局装包需加 `--break-system-packages`，建议改用 `python3 -m venv`。
+
+`gh` 认证方式：容器内执行 `gh auth login`，或运行时传 `-e GH_TOKEN=xxx`。
+
 ## 镜像标签
 
 | 标签 | 含义 |
@@ -49,6 +62,8 @@ docker build -t dsh .
 # 指定 dsh 版本
 docker build --build-arg DSH_VERSION=0.1.5-rc.3 -t dsh .
 ```
+
+> 提示：若本机外网走代理，容器内下载 apt/npm 包会非常慢，建议交给 CI 构建。
 
 ## 自动发布怎么工作
 
