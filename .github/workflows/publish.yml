@@ -8,8 +8,8 @@ on:
         required: false
         default: ""
   schedule:
-    # 每 6 小时一次；刻意避开整点（整点最拥堵、最容易被延迟）
-    - cron: "17 */6 * * *"
+    # 每小时一次；刻意避开整点（整点最拥堵、最容易被延迟）
+    - cron: "17 * * * *"
 
 permissions:
   contents: read

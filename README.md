@@ -79,7 +79,7 @@ docker build --build-arg DSH_VERSION=0.1.5-rc.3 -t dsh .
 | 触发方式 | 行为 |
 |---|---|
 | 手动（Actions → publish → Run workflow） | 总是构建；可指定版本，留空则跟随 `latest` / `next` |
-| 定时（每 6 小时，第 17 分） | 只在"上游有新版本"或"通道名没指对"时构建 |
+| 定时（每小时，第 17 分） | 只在"上游有新版本"或"通道名没指对"时构建；已发过的版本自动跳过，不会重复推送 |
 
 跟随的通道在 workflow 的 `CHANNELS` 变量里配置，目前是 `latest next`。
 
