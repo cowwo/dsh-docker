@@ -4,23 +4,47 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: "dsh 版本（留空 = 取 npm 上的 latest）"
+        description: "指定 dsh 版本（留空 = 自动跟随 npm 的 latest / next 通道）"
         required: false
         default: ""
   schedule:
-    - cron: "0 2 * * *"
+    # 每 6 小时一次；刻意避开整点（整点最拥堵、最容易被延迟）
+    - cron: "17 */6 * * *"
 
 permissions:
   contents: read
   packages: write
 
 env:
+  PKG: "@deepseek-ai/dsh"
   IMAGE: ghcr.io/${{ github.repository_owner }}/dsh
+  REPO_PATH: ${{ github.repository_owner }}/dsh
+  CHANNELS: "latest next"
 
 jobs:
-  publish:
+  # ① 解析：把 npm 的「通道 → 版本」反解成「版本 → 通道标签」矩阵
+  plan:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.plan.outputs.matrix }}
+      count: ${{ steps.plan.outputs.count }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: 解析通道与版本
+        id: plan
+        env:
+          INPUT_VERSION: ${{ inputs.version }}
+        run: node .github/scripts/plan.mjs
+
+  # ②③④⑤⑥ 每个版本构建一次，一次构建打上「版本号 + 通道名 + sha」
+  build:
+    needs: plan
+    if: needs.plan.outputs.count != '0'
     runs-on: ubuntu-latest
     timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJson(needs.plan.outputs.matrix) }}
     steps:
       - uses: actions/checkout@v4
 
@@ -31,55 +55,61 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: 解析要发布的 dsh 版本
-        id: resolve
-        run: |
-          set -euo pipefail
-          v="${{ inputs.version }}"
-          if [ -z "$v" ]; then
-            v="$(npm view @deepseek-ai/dsh dist-tags.latest)"
-          fi
-          echo "version=$v" >> "$GITHUB_OUTPUT"
-          echo "解析到 dsh 版本：$v"
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
 
-      - name: 判断是否需要构建
+      - name: 该版本是否需要构建（幂等）
         id: gate
         run: |
           set -euo pipefail
-          if docker manifest inspect "$IMAGE:${{ steps.resolve.outputs.version }}" >/dev/null 2>&1; then
-            exists=true
+          V="${{ matrix.version }}"
+          CH="${{ matrix.channels }}"
+          TOKEN=$(curl -s "https://ghcr.io/token?scope=repository:${REPO_PATH}:pull&service=ghcr.io" \
+            | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>console.log(JSON.parse(s).token))")
+          digest_of() {
+            curl -sI -H "Authorization: Bearer $TOKEN" \
+              -H "Accept: application/vnd.oci.image.index.v1+json,application/vnd.docker.distribution.manifest.list.v2+json,application/vnd.oci.image.manifest.v1+json" \
+              "https://ghcr.io/v2/${REPO_PATH}/manifests/$1" \
+              | tr -d '\r' | awk 'tolower($1)=="docker-content-digest:"{print $2; exit}'
+          }
+          need=true
+          if [ "${{ github.event_name }}" != "workflow_dispatch" ]; then
+            vd=$(digest_of "$V")
+            if [ -n "$vd" ]; then
+              need=false
+              if [ -n "$CH" ]; then
+                for c in $CH; do
+                  cd=$(digest_of "$c")
+                  if [ "$cd" != "$vd" ]; then
+                    echo "通道 $c 尚未指向 $V（当前 ${cd:-不存在}）→ 需要构建"
+                    need=true
+                  fi
+                done
+              fi
+            fi
           else
-            exists=false
+            echo "手动触发 → 总是构建"
           fi
-          if [ "$exists" = "false" ] || [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            echo "run=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "run=false" >> "$GITHUB_OUTPUT"
-            echo "该版本已发布，跳过构建"
-          fi
+          echo "run=$need" >> "$GITHUB_OUTPUT"
+          echo "结论：版本 $V / 通道 [$CH] → run=$need"
 
-      - name: 计算镜像标签（手动触发才更新 latest）
+      - name: 计算要打的标签
         id: tags
         if: steps.gate.outputs.run == 'true'
         run: |
           set -euo pipefail
-          tags="$IMAGE:${{ steps.resolve.outputs.version }}"
-          tags="$tags"$'\n'"$IMAGE:sha-${GITHUB_SHA::12}"
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            tags="$tags"$'\n'"$IMAGE:latest"
+          V="${{ matrix.version }}"
+          CH="${{ matrix.channels }}"
+          list="$IMAGE:$V"$'\n'"$IMAGE:sha-${GITHUB_SHA::12}-$V"
+          if [ -n "$CH" ]; then
+            for c in $CH; do list="$list"$'\n'"$IMAGE:$c"; done
           fi
-          printf '%s\n' "$tags"
           {
-            echo "tags<<TAGS_EOF"
-            printf '%s\n' "$tags"
+            echo "list<<TAGS_EOF"
+            printf '%s\n' "$list"
             echo "TAGS_EOF"
           } >> "$GITHUB_OUTPUT"
-
-      - uses: docker/setup-qemu-action@v3
-        if: steps.gate.outputs.run == 'true'
-
-      - uses: docker/setup-buildx-action@v3
-        if: steps.gate.outputs.run == 'true'
+          printf '将要推送：\n%s\n' "$list"
 
       - name: 构建并推送 linux/amd64 + linux/arm64
         if: steps.gate.outputs.run == 'true'
@@ -91,18 +121,18 @@ jobs:
           provenance: false
           sbom: false
           build-args: |
-            DSH_VERSION=${{ steps.resolve.outputs.version }}
-          tags: ${{ steps.tags.outputs.tags }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+            DSH_VERSION=${{ matrix.version }}
+          tags: ${{ steps.tags.outputs.list }}
+          cache-from: type=gha,scope=${{ matrix.version }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.version }}
 
       - name: 校验镜像里的 dsh 版本
         if: steps.gate.outputs.run == 'true'
         run: |
           set -euo pipefail
-          image="$IMAGE:${{ steps.resolve.outputs.version }}"
-          want="${{ steps.resolve.outputs.version }}"
+          image="$IMAGE:${{ matrix.version }}"
+          want="${{ matrix.version }}"
           docker pull "$image"
           got="$(docker run --rm "$image" dsh -V)"
-          echo "镜像内 dsh 版本=$got  期望=$want"
+          echo "镜像内=$got 期望=$want"
           [ "$got" = "$want" ] || { echo "::error::版本不一致"; exit 1; }
