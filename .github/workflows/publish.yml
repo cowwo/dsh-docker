@@ -8,8 +8,9 @@ on:
         required: false
         default: ""
   schedule:
-    # 每小时一次；刻意避开整点（整点最拥堵、最容易被延迟）
-    - cron: "17 * * * *"
+    # 每 5 分钟一次（GitHub 允许的最短间隔）
+    # 注意：这个粒度无法避开整点，整点那次可能被排队延迟（无害，构建是幂等的）
+    - cron: "*/5 * * * *"
 
 permissions:
   contents: read
